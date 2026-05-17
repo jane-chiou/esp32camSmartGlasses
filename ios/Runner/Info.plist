@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>語音播報功能需要麥克風權限</string>
-	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
