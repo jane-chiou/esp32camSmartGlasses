@@ -28,10 +28,13 @@
 // ════════════════════════════════════════════════════════════════
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 //StatelessWidget
 void main() {
   runApp(const VisionAssistApp());
@@ -67,7 +70,7 @@ class VisionAssistApp extends StatelessWidget {
 // ══════════════════════════════════════════════════════════════════
 enum AppState {
   idle,          // 等待操作
-  connecting,    // 檢查 ESP32-CAM 連線
+  //connecting,    // 檢查 ESP32-CAM 連線
   capturing,     // 拍照中
   analyzing,     // Gemini 分析中
   speaking,      // TTS 朗讀中
@@ -97,6 +100,13 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   String   _statusText = '等待中';
   Uint8List? _photoBytes;
   bool _deviceOnline   = false;
+
+  // ── 電池狀態（方案 B：純顯示）─────────────────────────────────
+  // 透過偵測 ESP32 連線時間來推算：
+  // 剛連上 = 充電中（假設剛開機插著電）
+  // 連線超過 30 分鐘 = 使用中
+  bool   _isCharging     = false;
+  DateTime? _connectedTime;
 
   // ── TTS ────────────────────────────────────────────────────────
   late FlutterTts _tts;
@@ -304,6 +314,47 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     //await _speak(description ?? '無法取得描述');
   }
 
+  //  下載 / 分享照片
+  // ══════════════════════════════════════════════════════════════
+  Future<void> _downloadPhoto() async {
+    if (_photoBytes == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('沒有可下載的照片，請先拍照')),
+      );
+      return;
+    }
+
+    try {
+      // 產生檔名
+      final now = DateTime.now();
+      final filename = 'esp32cam_'
+          '${now.year}${now.month.toString().padLeft(2, '0')}'
+          '${now.day.toString().padLeft(2, '0')}_'
+          '${now.hour.toString().padLeft(2, '0')}'
+          '${now.minute.toString().padLeft(2, '0')}'
+          '${now.second.toString().padLeft(2, '0')}.jpg';
+
+      // 寫入暫存目錄
+      final tempDir = await getTemporaryDirectory();
+      final file    = File('${tempDir.path}/$filename');
+      await file.writeAsBytes(_photoBytes!);
+
+      // 用系統分享（iOS 可以存到相簿、傳 AirDrop、存檔案等）
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'image/jpeg')],
+        text: '來自 ESP32-CAM 的照片',
+        subject: filename,
+      );
+
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('下載失敗：$e')),
+        );
+      }
+    }
+  }
+
   // ── 呼叫 Gemini Vision API ─────────────────────────────────────
   Future<String> _callGeminiVision(Uint8List imageBytes) async {
     const model = 'gemini-2.5-flash-lite';  // 速度快且支援圖片
@@ -412,8 +463,9 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             Expanded(
               flex: 3,
               child: _PhotoPreview(
-                photoBytes: _photoBytes,
+                photoBytes:  _photoBytes,
                 isCapturing: _state == AppState.capturing,
+                onDownload:  _photoBytes != null ? _downloadPhoto : null,  // ← 加這行
               ),
             ),
 
@@ -496,6 +548,88 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   }
 }
 
+//  照片預覽（含下載按鈕）
+// ══════════════════════════════════════════════════════════════════
+class _PhotoPreview extends StatelessWidget {
+  final Uint8List? photoBytes;
+  final bool isCapturing;
+  final VoidCallback? onDownload;
+
+  const _PhotoPreview({
+    required this.photoBytes,
+    required this.isCapturing,
+    required this.onDownload,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161B22),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF30363D)),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(15),
+        child: Stack(
+          children: [
+            SizedBox.expand(
+              child: isCapturing
+                  ? const Center(child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Colors.blue),
+                  SizedBox(height: 12),
+                  Text('拍照中...',
+                      style: TextStyle(color: Colors.white70)),
+                ],
+              ))
+                  : photoBytes != null
+                  ? Image.memory(photoBytes!, fit: BoxFit.contain)
+                  : const Center(child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.camera_alt, size: 64, color: Colors.white24),
+                  SizedBox(height: 8),
+                  Text('尚未拍照',
+                      style: TextStyle(color: Colors.white38, fontSize: 16)),
+                ],
+              )),
+            ),
+
+            // 下載按鈕（右上角）
+            if (photoBytes != null && onDownload != null)
+              Positioned(
+                top: 8, right: 8,
+                child: GestureDetector(
+                  onTap: onDownload,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.65),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.download, color: Colors.white, size: 18),
+                        SizedBox(width: 4),
+                        Text('下載',
+                            style: TextStyle(color: Colors.white, fontSize: 13)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  子元件
 // ══════════════════════════════════════════════════════════════════
@@ -523,44 +657,6 @@ class _StatusBar extends StatelessWidget {
       const SizedBox(width: 8),
       Text(text, style: TextStyle(color: _color, fontSize: 16)),
     ]),
-  );
-}
-
-class _PhotoPreview extends StatelessWidget {
-  final Uint8List? photoBytes;
-  final bool isCapturing;
-  const _PhotoPreview({required this.photoBytes, required this.isCapturing});
-
-  @override
-  Widget build(BuildContext context) => Container(
-    margin: const EdgeInsets.all(12),
-    decoration: BoxDecoration(
-      color: const Color(0xFF161B22),
-      borderRadius: BorderRadius.circular(16),
-      border: Border.all(color: const Color(0xFF30363D)),
-    ),
-    child: ClipRRect(
-      borderRadius: BorderRadius.circular(15),
-      child: isCapturing
-        ? const Center(child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircularProgressIndicator(color: Colors.blue),
-              SizedBox(height: 12),
-              Text('拍照中...', style: TextStyle(color: Colors.white70)),
-            ],
-          ))
-        : photoBytes != null
-          ? Image.memory(photoBytes!, fit: BoxFit.contain)
-          : const Center(child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.camera_alt, size: 64, color: Colors.white24),
-                SizedBox(height: 8),
-                Text('尚未拍照', style: TextStyle(color: Colors.white38, fontSize: 16)),
-              ],
-            )),
-    ),
   );
 }
 
