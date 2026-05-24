@@ -88,7 +88,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
   // ── 設定（可在設定頁修改）──────────────────────────────────────
   String _espHost      = '172.20.10.2';   // ESP32-CAM AP 預設 IP
-  String _geminiApiKey = 'AIzaSyBBM_XW0veFOpvGmM4VKHuXN0kDoRkNFRI';  // ← 填入你的 API Key
+  String _geminiApiKey = '';  // ← 填入你的 API Key
   String _promptText = '請用繁體中文簡短描述這張照片最重要的內容，50字以內，直接描述不要分點。';
 
   // ── 狀態 ───────────────────────────────────────────────────────
