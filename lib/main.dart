@@ -344,6 +344,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         [XFile(file.path, mimeType: 'image/jpeg')],
         text: '來自 ESP32-CAM 的照片',
         subject: filename,
+        sharePositionOrigin: Rect.fromLTWH(0, 0, 390, 100), // ← 加這行
       );
 
     } catch (e) {
