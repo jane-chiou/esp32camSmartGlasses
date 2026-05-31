@@ -35,10 +35,21 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'dart:math';
+import 'package:gal/gal.dart';
+import 'package:flutter/rendering.dart';
+import 'dart:ui' as ui;
 //StatelessWidget
 void main() {
   runApp(const VisionAssistApp());
 }
+
+// 畫質設定
+String _frameSize   = 'VGA';   // 預設 VGA
+int    _jpegQuality = 12;       // 1~63，數字越小越好
+
+// 預設放好的 API Key（使用者可一鍵複製）
+final String _presetApiKey = 'AIzaSyDydYbEUYRg9LvbHxtufz6Oaf44j_pbeN0';  // ← 填入
 
 // ── App 入口 ──────────────────────────────────────────────────────
 class VisionAssistApp extends StatelessWidget {
@@ -105,8 +116,11 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   // 透過偵測 ESP32 連線時間來推算：
   // 剛連上 = 充電中（假設剛開機插著電）
   // 連線超過 30 分鐘 = 使用中
-  bool   _isCharging     = false;
+  //bool   _isCharging     = false;
   DateTime? _connectedTime;
+
+  //照片旋轉角度
+  int _rotationDegrees = 0;  // 維持 int，0~360 都可以輸入
 
   // ── TTS ────────────────────────────────────────────────────────
   late FlutterTts _tts;
@@ -153,6 +167,20 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       setState(() { _isSpeaking = false; _state = AppState.idle; });
       debugPrint('[TTS] 錯誤: $msg');
     });
+  }
+
+  //調畫質
+  Future<void> _applyQualitySettings() async {
+    if (!_deviceOnline) return;
+    try {
+      await http.get(
+        Uri.parse('http://$_espHost/set_quality'
+            '?framesize=$_frameSize&quality=$_jpegQuality'),
+      ).timeout(const Duration(seconds: 5));
+      debugPrint('[Quality] 已套用：$_frameSize, quality=$_jpegQuality');
+    } catch (e) {
+      debugPrint('[Quality] 設定失敗：$e');
+    }
   }
 
   // ── 脈衝動畫（拍照按鈕）──────────────────────────────────────
@@ -204,12 +232,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         return;
       }
       setState(() { _photoBytes = resp.bodyBytes; });
+      // 旋轉照片
+      final rotated = await _rotateImage(resp.bodyBytes, _rotationDegrees);
+      setState(() { _photoBytes = rotated; });
+
 
       setState(() {
         _state      = AppState.analyzing;
         _statusText = '分析中...';
       });
-      final description = await _callGeminiVision(resp.bodyBytes);
+      final description = await _callGeminiVision(rotated);
 
       setState(() {
         _state      = AppState.speaking;
@@ -275,6 +307,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       if (resp.statusCode == 200) {
         imageBytes = resp.bodyBytes;
         setState(() { _photoBytes = imageBytes; });
+        // 旋轉照片
+        final rotated = await _rotateImage(imageBytes!, _rotationDegrees);
+        setState(() { _photoBytes = rotated; });
+        imageBytes = rotated;  // 傳給 Gemini 的也是旋轉後的版本
         debugPrint('[HTTP] 取得照片 ${imageBytes.length} bytes');
       } else {
         throw Exception('HTTP ${resp.statusCode}');
@@ -314,44 +350,158 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     //await _speak(description ?? '無法取得描述');
   }
 
+  // 旋轉照片（回傳旋轉後的 Uint8List）
+  Future<Uint8List> _rotateImage(Uint8List bytes, int degrees) async {
+    if (degrees == 0) return bytes;
+
+    final codec    = await ui.instantiateImageCodec(bytes);
+    final frame    = await codec.getNextFrame();
+    final image    = frame.image;
+    final recorder = ui.PictureRecorder();
+
+    final double w   = image.width.toDouble();
+    final double h   = image.height.toDouble();
+    final double rad = degrees * pi / 180;
+
+    // 計算旋轉後的邊界大小
+    final double cos = (pi / 180 * degrees).abs();
+    final double newW = (w * cos + h * (1 - cos)).abs();
+    final double newH = (h * cos + w * (1 - cos)).abs();
+
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, newW, newH));
+    canvas.translate(newW / 2, newH / 2);
+    canvas.rotate(rad);
+    canvas.translate(-w / 2, -h / 2);
+    canvas.drawImage(image, Offset.zero, Paint());
+
+    final picture  = recorder.endRecording();
+    final rotated  = await picture.toImage(newW.toInt(), newH.toInt());
+    final byteData = await rotated.toByteData(format: ui.ImageByteFormat.png);
+
+    return byteData!.buffer.asUint8List();
+  }
+
   //  下載 / 分享照片
   // ══════════════════════════════════════════════════════════════
   Future<void> _downloadPhoto() async {
     if (_photoBytes == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('沒有可下載的照片，請先拍照')),
-      );
+          const SnackBar(content: Text('沒有可下載的照片，請先拍照')));
       return;
     }
 
-    try {
-      // 產生檔名
-      final now = DateTime.now();
-      final filename = 'esp32cam_'
-          '${now.year}${now.month.toString().padLeft(2, '0')}'
-          '${now.day.toString().padLeft(2, '0')}_'
-          '${now.hour.toString().padLeft(2, '0')}'
-          '${now.minute.toString().padLeft(2, '0')}'
-          '${now.second.toString().padLeft(2, '0')}.jpg';
+    // 顯示選擇方式
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF161B22),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('儲存照片',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
 
-      // 寫入暫存目錄
+            // 儲存到相簿
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1565C0),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                icon: const Icon(Icons.photo_library),
+                label: const Text('儲存到相簿', style: TextStyle(fontSize: 16)),
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await _saveToGallery();
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // 分享
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF21262D),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                icon: const Icon(Icons.share),
+                label: const Text('分享', style: TextStyle(fontSize: 16)),
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await _sharePhotoFile();
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消', style: TextStyle(color: Colors.white60)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveToGallery() async {
+    try {
+      final now      = DateTime.now();
+      final filename = 'esp32cam_'
+          '${now.year}${now.month.toString().padLeft(2,'0')}'
+          '${now.day.toString().padLeft(2,'0')}_'
+          '${now.hour.toString().padLeft(2,'0')}'
+          '${now.minute.toString().padLeft(2,'0')}'
+          '${now.second.toString().padLeft(2,'0')}.jpg';
+
+      // gal 需要先寫成檔案再存入相簿
       final tempDir = await getTemporaryDirectory();
       final file    = File('${tempDir.path}/$filename');
       await file.writeAsBytes(_photoBytes!);
 
-      // 用系統分享（iOS 可以存到相簿、傳 AirDrop、存檔案等）
-      await Share.shareXFiles(
-        [XFile(file.path, mimeType: 'image/jpeg')],
-        text: '來自 ESP32-CAM 的照片',
-        subject: filename,
-        sharePositionOrigin: Rect.fromLTWH(0, 0, 390, 100), // ← 加這行
-      );
+      await Gal.putImage(file.path);
 
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('已儲存到相簿！')));
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('下載失敗：$e')),
-        );
+            SnackBar(content: Text('儲存失敗：$e')));
+      }
+    }
+  }
+
+  Future<void> _sharePhotoFile() async {
+    try {
+      final now      = DateTime.now();
+      final filename = 'esp32cam_'
+          '${now.year}${now.month.toString().padLeft(2,'0')}'
+          '${now.day.toString().padLeft(2,'0')}_'
+          '${now.hour.toString().padLeft(2,'0')}'
+          '${now.minute.toString().padLeft(2,'0')}'
+          '${now.second.toString().padLeft(2,'0')}.jpg';
+
+      final tempDir = await getTemporaryDirectory();
+      final file    = File('${tempDir.path}/$filename');
+      await file.writeAsBytes(_photoBytes!);
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'image/jpeg')],
+        text: '來自 ESP32-CAM 的照片',
+        sharePositionOrigin: Rect.fromLTWH(0, 0, 390, 100),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('分享失敗：$e')));
       }
     }
   }
@@ -436,7 +586,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       backgroundColor: const Color(0xFF0D1117),
       appBar: AppBar(
         backgroundColor: const Color(0xFF161B22),
-        title: const Text('視覺輔助裝置', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: const Text('阿瑪特拉斯', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
           // 連線狀態指示
           Padding(
@@ -476,6 +626,36 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               child: _ResultPanel(text: _resultText, state: _state),
             ),
 
+            // ── 提示詞快速編輯 ──
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: TextField(
+                controller: TextEditingController(text: _promptText),
+                style: const TextStyle(color: Colors.white, fontSize: 14),
+                maxLines: 2,
+                onChanged: (value) => setState(() { _promptText = value; }),
+                decoration: InputDecoration(
+                  labelText: '提示詞',
+                  labelStyle: const TextStyle(color: Colors.white38, fontSize: 13),
+                  hintText: '請用繁體中文描述...',
+                  hintStyle: const TextStyle(color: Colors.white24),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFF30363D)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFF1565C0)),
+                  ),
+                  filled: true,
+                  fillColor: const Color(0xFF161B22),
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 8),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+
             // ── 控制按鈕 ──
             _ControlPanel(
               state: _state,
@@ -500,6 +680,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
     final apiCtrl    = TextEditingController(text: _geminiApiKey);
     final promptCtrl = TextEditingController(text: _promptText);
 
+
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -519,12 +701,173 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               const Text('設定', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
               _SettingField(controller: hostCtrl,   label: 'ESP32-CAM IP',  hint: '192.168.4.1'),
+              // ── 1. 金鑰複製區（在 API Key 輸入框上方）──
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0D1117),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFF30363D)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('預設 API Key',
+                        style: TextStyle(color: Colors.white60, fontSize: 13)),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            _presetApiKey.length > 20
+                                ? '${_presetApiKey.substring(0, 20)}...'
+                                : _presetApiKey,
+                            style: const TextStyle(color: Colors.white70, fontSize: 13),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF21262D),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                          ),
+                          icon: const Icon(Icons.copy, size: 16),
+                          label: const Text('複製'),
+                          onPressed: () {
+                            apiCtrl.text = _presetApiKey;
+                            setState(() { _geminiApiKey = _presetApiKey; });
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('已複製到 API Key 欄位')));
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+
+// ── 2. API Key 輸入框（原本就有）──
+              _SettingField(controller: apiCtrl,
+                  label: 'Gemini API Key', hint: 'AIza...'),
               const SizedBox(height: 12),
-              _SettingField(controller: apiCtrl,    label: 'Gemini API Key', hint: 'AIza...'),
+              //_SettingField(controller: apiCtrl,    label: 'Gemini API Key', hint: 'AIza...'),
               const SizedBox(height: 12),
               _SettingField(controller: promptCtrl, label: '提示詞', maxLines: 4,
                 hint: '請用繁體中文描述...'),
               const SizedBox(height: 20),
+              const SizedBox(height: 12),
+              const Text('照片旋轉角度（0～360）',
+                  style: TextStyle(color: Colors.white60, fontSize: 14)),
+              const SizedBox(height: 8),
+              TextFormField(
+                initialValue: _rotationDegrees.toString(),
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: '輸入旋轉角度，例如 90',
+                  hintStyle: const TextStyle(color: Colors.white30),
+                  suffixText: '°',
+                  suffixStyle: const TextStyle(color: Colors.white60),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFF30363D)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFF1565C0)),
+                  ),
+                  filled: true,
+                  fillColor: const Color(0xFF0D1117),
+                ),
+                onChanged: (value) {
+                  final parsed = int.tryParse(value);
+                  if (parsed != null && parsed >= 0 && parsed <= 360) {
+                    setState(() { _rotationDegrees = parsed; });
+                  }
+                },
+              ),
+              const SizedBox(height: 12),
+              const Text('鏡頭解析度',
+                  style: TextStyle(color: Colors.white60, fontSize: 14)),
+              const SizedBox(height: 8),
+              StatefulBuilder(
+                builder: (context, setModalState) => Column(
+                  children: [
+                    // 解析度選擇
+                    Row(
+                      children: ['QVGA', 'VGA', 'SVGA', 'UXGA'].map((fs) {
+                        final selected = _frameSize == fs;
+                        final label = {
+                          'QVGA': '320×240\n(快)',
+                          'VGA':  '640×480\n(預設)',
+                          'SVGA': '800×600',
+                          'UXGA': '1600×1200\n(慢)',
+                        }[fs]!;
+                        return Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 3),
+                            child: GestureDetector(
+                              onTap: () {
+                                setModalState(() {});
+                                setState(() { _frameSize = fs; });
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: selected
+                                      ? const Color(0xFF1565C0)
+                                      : const Color(0xFF21262D),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                      color: selected
+                                          ? const Color(0xFF1565C0)
+                                          : const Color(0xFF30363D)),
+                                ),
+                                child: Center(
+                                  child: Text(label,
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: selected ? Colors.white : Colors.white60,
+                                        fontWeight: selected
+                                            ? FontWeight.bold : FontWeight.normal,
+                                      )),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 12),
+                    // JPEG 品質滑桿
+                    Row(
+                      children: [
+                        const Text('JPEG 品質',
+                            style: TextStyle(color: Colors.white60, fontSize: 13)),
+                        const SizedBox(width: 8),
+                        Text('$_jpegQuality（${_jpegQuality <= 15 ? "高" : _jpegQuality <= 30 ? "中" : "低"}品質）',
+                            style: const TextStyle(color: Colors.white, fontSize: 13)),
+                      ],
+                    ),
+                    Slider(
+                      value: _jpegQuality.toDouble(),
+                      min: 4, max: 63,
+                      divisions: 59,
+                      activeColor: const Color(0xFF1565C0),
+                      onChanged: (v) {
+                        setModalState(() {});
+                        setState(() { _jpegQuality = v.toInt(); });
+                      },
+                    ),
+                    const Text('數字越小畫質越好但速度越慢',
+                        style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  ],
+                ),
+              ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFF1565C0),
@@ -534,10 +877,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                   setState(() {
                     _espHost      = hostCtrl.text.trim();
                     _geminiApiKey = apiCtrl.text.trim();
-                    _promptText   = promptCtrl.text.trim();
+                    // 提示詞已在主畫面即時更新，不需再設定
                   });
                   Navigator.pop(ctx);
                   _checkDeviceConnection();
+                  // 發送畫質設定
+                  _applyQualitySettings();
                 },
                 child: const Text('儲存', style: TextStyle(fontSize: 18)),
               ),
@@ -696,6 +1041,8 @@ class _ResultPanel extends StatelessWidget {
         ),
   );
 }
+
+
 
 class _ControlPanel extends StatelessWidget {
   final AppState state;

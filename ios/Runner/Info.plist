@@ -6,6 +6,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>語音播報功能需要麥克風權限</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+    <string>儲存 ESP32-CAM 拍攝的照片到相簿</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
