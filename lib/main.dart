@@ -104,12 +104,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   String _espHost      = '172.20.10.2';   // ESP32-CAM AP 預設 IP
   String _geminiApiKey = '';  // ← 填入你的 API Key
   String _promptText = '請用繁體中文簡短描述這張照片最重要的內容，50字以內，直接描述不要分點。';
+  // 宣告一個全域的控制器，並把預設提示詞塞進去
+  final TextEditingController promptCtrl = TextEditingController(text: '請用繁體中文詳細描述這張照片的內容...');
+  DateTime? _lastApiCallTime;  // 上次呼叫 Gemini 的時間
 
   // ── 狀態 ───────────────────────────────────────────────────────
   AppState _state      = AppState.idle;
   String   _resultText = '按下「拍照辨識」開始使用';
   String   _statusText = '等待中';
   Uint8List? _photoBytes;
+  Uint8List? _originalBytes;   // 新增，傳給 Gemini 用（原始）
   bool _deviceOnline   = false;
 
   // ── 電池狀態（方案 B：純顯示）─────────────────────────────────
@@ -196,7 +200,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
   void _startPolling() {
     Future.doWhile(() async {
-      await Future.delayed(const Duration(seconds: 5)); // 原本2秒改成5秒
+      await Future.delayed(const Duration(seconds: 10));
       if (_state != AppState.idle || !_deviceOnline) return true;
       try {
         final resp = await http
@@ -233,15 +237,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       }
       setState(() { _photoBytes = resp.bodyBytes; });
       // 旋轉照片
+      _originalBytes = resp.bodyBytes;  // 保存原始
       final rotated = await _rotateImage(resp.bodyBytes, _rotationDegrees);
-      setState(() { _photoBytes = rotated; });
+      setState(() { _photoBytes = rotated; });  // 顯示旋轉後
 
 
       setState(() {
         _state      = AppState.analyzing;
         _statusText = '分析中...';
       });
-      final description = await _callGeminiVision(rotated);
+      final description = await _callGeminiVision(_originalBytes!);  // Gemini 用原始
 
       setState(() {
         _state      = AppState.speaking;
@@ -305,13 +310,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           .get(Uri.parse('http://$_espHost/capture_now'))
           .timeout(const Duration(seconds: 15));
       if (resp.statusCode == 200) {
-        imageBytes = resp.bodyBytes;
-        setState(() { _photoBytes = imageBytes; });
-        // 旋轉照片
-        final rotated = await _rotateImage(imageBytes!, _rotationDegrees);
-        setState(() { _photoBytes = rotated; });
-        imageBytes = rotated;  // 傳給 Gemini 的也是旋轉後的版本
-        debugPrint('[HTTP] 取得照片 ${imageBytes.length} bytes');
+        _originalBytes = resp.bodyBytes;  // 保存原始
+        final rotated = await _rotateImage(resp.bodyBytes, _rotationDegrees);
+        setState(() { _photoBytes = rotated; });  // 顯示旋轉後
+        imageBytes = _originalBytes;  // Gemini 用原始
+        //debugPrint('[HTTP] 取得照片 ${imageBytes.length} bytes');
+        debugPrint('[HTTP] 取得照片 ${resp.bodyBytes.length} bytes');
       } else {
         throw Exception('HTTP ${resp.statusCode}');
       }
@@ -335,6 +339,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
     String? description;
     try {
+      if (imageBytes == null) return;
       description = await _callGeminiVision(imageBytes);
     } catch (e) {
       _handleError('AI 分析失敗，請檢查 API Key 或網路', e);
@@ -376,7 +381,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
     final picture  = recorder.endRecording();
     final rotated  = await picture.toImage(newW.toInt(), newH.toInt());
-    final byteData = await rotated.toByteData(format: ui.ImageByteFormat.png);
+    final byteData = await rotated.toByteData(format: ui.ImageByteFormat.rawRgba);
 
     return byteData!.buffer.asUint8List();
   }
@@ -508,6 +513,13 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
   // ── 呼叫 Gemini Vision API ─────────────────────────────────────
   Future<String> _callGeminiVision(Uint8List imageBytes) async {
+    // 強制間隔至少 10 秒
+    if (_lastApiCallTime != null) {
+      final elapsed = DateTime.now().difference(_lastApiCallTime!).inSeconds;
+      if (elapsed < 10) {
+        await Future.delayed(Duration(seconds: 10 - elapsed));
+      }
+    }
     const model = 'gemini-2.5-flash-lite';  // 速度快且支援圖片
     final url = Uri.parse(
       'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$_geminiApiKey',
@@ -627,7 +639,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             ),
 
             // ── 提示詞快速編輯 ──
-            Padding(
+            /*Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: TextField(
                 controller: TextEditingController(text: _promptText),
@@ -635,6 +647,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                 maxLines: 2,
                 onChanged: (value) => setState(() { _promptText = value; }),
                 decoration: InputDecoration(
+                  _SettingField(controller: promptCtrl, label: '提示詞', maxLines: 4,
+                      hint: '請用繁體中文描述...'),
                   labelText: '提示詞',
                   labelStyle: const TextStyle(color: Colors.white38, fontSize: 13),
                   hintText: '請用繁體中文描述...',
@@ -652,6 +666,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                   contentPadding: const EdgeInsets.symmetric(
                       horizontal: 12, vertical: 8),
                 ),
+                //_SettingField(controller: promptCtrl, label: '提示詞', maxLines: 4, hint: '請用繁體中文描述...'),
+              ),
+            ),*/
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: _SettingField(
+                controller: promptCtrl,
+                label: '提示詞',
+                maxLines: 4,
+                hint: "請用繁體中文描述...",
               ),
             ),
             const SizedBox(height: 8),
@@ -755,8 +779,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               const SizedBox(height: 12),
               //_SettingField(controller: apiCtrl,    label: 'Gemini API Key', hint: 'AIza...'),
               const SizedBox(height: 12),
-              _SettingField(controller: promptCtrl, label: '提示詞', maxLines: 4,
-                hint: '請用繁體中文描述...'),
+              //_SettingField(controller: promptCtrl, label: '提示詞', maxLines: 4,
+              //  hint: '請用繁體中文描述...'),
               const SizedBox(height: 20),
               const SizedBox(height: 12),
               const Text('照片旋轉角度（0～360）',
@@ -769,7 +793,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                 decoration: InputDecoration(
                   hintText: '輸入旋轉角度，例如 90',
                   hintStyle: const TextStyle(color: Colors.white30),
-                  suffixText: '°',
+                  suffixText: '20',
                   suffixStyle: const TextStyle(color: Colors.white60),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(10),
@@ -801,10 +825,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                       children: ['QVGA', 'VGA', 'SVGA', 'UXGA'].map((fs) {
                         final selected = _frameSize == fs;
                         final label = {
-                          'QVGA': '320×240\n(快)',
-                          'VGA':  '640×480\n(預設)',
-                          'SVGA': '800×600',
-                          'UXGA': '1600×1200\n(慢)',
+                          'QVGA': '320×240\n(爛透了)',
+                          'VGA':  '640×480\n(超糊)',
+                          'SVGA': '800×600\n(更糊)',
+                          'UXGA': '1600×1200\n(糊)',
                         }[fs]!;
                         return Expanded(
                           child: Padding(
