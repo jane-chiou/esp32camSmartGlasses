@@ -47,9 +47,10 @@ void main() {
 // 畫質設定
 String _frameSize   = 'VGA';   // 預設 VGA
 int    _jpegQuality = 12;       // 1~63，數字越小越好
+//bool _isStreaming = false;  // 串流開關狀態
 
 // 預設放好的 API Key（使用者可一鍵複製）
-final String _presetApiKey = 'AIzaSyDydYbEUYRg9LvbHxtufz6Oaf44j_pbeN0';  // ← 填入
+final String _presetApiKey = 'AQ.Ab8RN6LKTxDJm4DdoFce-BwEdNbsLALHJQG9lgDPNf680vs6NQ';  // ← 填入
 
 // ── App 入口 ──────────────────────────────────────────────────────
 class VisionAssistApp extends StatelessWidget {
@@ -122,6 +123,11 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   // 連線超過 30 分鐘 = 使用中
   //bool   _isCharging     = false;
   DateTime? _connectedTime;
+
+  // 串流相關
+  bool       _isStreaming    = false;
+  Uint8List? _streamBytes;   // 串流畫面
+  bool       _streamRunning  = false;
 
   //照片旋轉角度
   int _rotationDegrees = 0;  // 維持 int，0~360 都可以輸入
@@ -201,6 +207,8 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   void _startPolling() {
     Future.doWhile(() async {
       await Future.delayed(const Duration(seconds: 10));
+      if (!mounted) return false;
+      if (_isStreaming) return true;//串流的時候不會自動抓取照片
       if (_state != AppState.idle || !_deviceOnline) return true;
       try {
         final resp = await http
@@ -215,6 +223,34 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       } catch (_) {}
       return true;
     });
+  }
+
+  void _toggleStream() {
+    setState(() { _isStreaming = !_isStreaming; });
+    if (_isStreaming) {
+      _startStreamLoop();
+    } else {
+      _streamRunning = false;
+      setState(() { _streamBytes = null; });
+    }
+  }
+
+  Future<void> _startStreamLoop() async {
+    _streamRunning = true;
+    while (_streamRunning && _isStreaming && mounted) {
+      if (_deviceOnline) {
+        try {
+          final resp = await http
+              .get(Uri.parse('http://$_espHost/stream_frame'))
+              .timeout(const Duration(seconds: 2));
+          if (resp.statusCode == 200 && mounted && _isStreaming) {
+            setState(() { _streamBytes = resp.bodyBytes; });
+          }
+        } catch (_) {}
+      }
+      // 不固定等待，讓速度跟著網路走
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
   }
 
 // 從 /capture 取照片並送 Gemini 分析
@@ -627,8 +663,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               flex: 3,
               child: _PhotoPreview(
                 photoBytes:  _photoBytes,
+                streamBytes: _streamBytes,
                 isCapturing: _state == AppState.capturing,
-                onDownload:  _photoBytes != null ? _downloadPhoto : null,  // ← 加這行
+                isStreaming: _isStreaming,
+                espHost:     _espHost,
+                onDownload:  _photoBytes != null ? _downloadPhoto : null,  //下載照片用
+
               ),
             ),
 
@@ -685,10 +725,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               state: _state,
               isSpeaking: _isSpeaking,
               deviceOnline: _deviceOnline,
+              isStreaming:      _isStreaming,
               onCapture: _captureAndAnalyze,
               onStop: _stopSpeaking,
               onRepeat: () => _speak(_resultText),
               onRefresh: _checkDeviceConnection,
+              onToggleStream:  _toggleStream,
             ),
 
             const SizedBox(height: 12),
@@ -922,12 +964,18 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 // ══════════════════════════════════════════════════════════════════
 class _PhotoPreview extends StatelessWidget {
   final Uint8List? photoBytes;
+  final Uint8List? streamBytes;
   final bool isCapturing;
+  final bool isStreaming;
+  final String espHost;
   final VoidCallback? onDownload;
 
   const _PhotoPreview({
     required this.photoBytes,
+    required this.streamBytes,
     required this.isCapturing,
+    required this.isStreaming,
+    required this.espHost,
     required this.onDownload,
   });
 
@@ -951,8 +999,37 @@ class _PhotoPreview extends StatelessWidget {
                 children: [
                   CircularProgressIndicator(color: Colors.blue),
                   SizedBox(height: 12),
-                  Text('拍照中...',
-                      style: TextStyle(color: Colors.white70)),
+                  Text('拍照中...', style: TextStyle(color: Colors.white70)),
+                ],
+              ))
+                  : isStreaming
+                  ? streamBytes != null
+                  ? Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.memory(streamBytes!, fit: BoxFit.contain,
+                      gaplessPlayback: true),  // gaplessPlayback 避免閃爍
+                  const Positioned(
+                    top: 8, left: 8,
+                    child: Row(
+                      children: [
+                        Icon(Icons.circle, color: Colors.redAccent, size: 10),
+                        SizedBox(width: 4),
+                        Text('LIVE', style: TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                  ),
+                ],
+              )
+                  : const Center(child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Colors.tealAccent),
+                  SizedBox(height: 8),
+                  Text('串流連線中...', style: TextStyle(color: Colors.white60)),
                 ],
               ))
                   : photoBytes != null
@@ -1076,15 +1153,19 @@ class _ControlPanel extends StatelessWidget {
   final VoidCallback onStop;
   final VoidCallback onRepeat;
   final VoidCallback onRefresh;
+  final bool isStreaming;
+  final VoidCallback onToggleStream;
 
   const _ControlPanel({
     required this.state,
     required this.isSpeaking,
     required this.deviceOnline,
+    required this.isStreaming,
     required this.onCapture,
     required this.onStop,
     required this.onRepeat,
     required this.onRefresh,
+    required this.onToggleStream,
   });
 
   @override
@@ -1095,26 +1176,66 @@ class _ControlPanel extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Column(children: [
         // ── 主按鈕：拍照辨識 ──
-        SizedBox(
-          width: double.infinity,
-          height: 72,
-          child: ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: busy
-                  ? Colors.grey.shade800
-                  : (deviceOnline ? const Color(0xFF1565C0) : Colors.grey.shade700),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        Row(
+          children: [
+            // 串流開關按鈕
+            SizedBox(
+              width: 72, height: 72,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: isStreaming
+                      ? Colors.tealAccent.shade700
+                      : const Color(0xFF21262D),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
+                  padding: EdgeInsets.zero,
+                ),
+                onPressed: onToggleStream,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                        isStreaming ? Icons.videocam : Icons.videocam_off,
+                        color: Colors.white, size: 24),
+                    const SizedBox(height: 2),
+                    Text(
+                        isStreaming ? '串流\n關閉' : '串流\n開啟',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white, fontSize: 10)),
+                  ],
+                ),
+              ),
             ),
-            onPressed: busy || !deviceOnline ? null : onCapture,
-            icon: busy
-              ? const SizedBox(width: 24, height: 24,
-                  child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-              : const Icon(Icons.camera_alt, size: 28),
-            label: Text(
-              busy ? '處理中...' : '拍照辨識',
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            const SizedBox(width: 8),
+
+            // 拍照辨識按鈕（原本的，改成 Expanded）
+            Expanded(
+              child: SizedBox(
+                height: 72,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: busy
+                        ? Colors.grey.shade800
+                        : (deviceOnline
+                        ? const Color(0xFF1565C0)
+                        : Colors.grey.shade700),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  onPressed: busy || !deviceOnline ? null : onCapture,
+                  icon: busy
+                      ? const SizedBox(width: 24, height: 24,
+                      child: CircularProgressIndicator(
+                          color: Colors.white, strokeWidth: 2))
+                      : const Icon(Icons.camera_alt, size: 28),
+                  label: Text(
+                      busy ? '處理中...' : '拍照辨識',
+                      style: const TextStyle(
+                          fontSize: 20, fontWeight: FontWeight.bold)),
+                ),
+              ),
             ),
-          ),
+          ],
         ),
 
         const SizedBox(height: 8),
