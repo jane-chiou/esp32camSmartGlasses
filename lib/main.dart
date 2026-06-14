@@ -35,10 +35,10 @@ import 'package:http/http.dart' as http;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'dart:math';
+//import 'dart:math';
 import 'package:gal/gal.dart';
 import 'package:flutter/rendering.dart';
-import 'dart:ui' as ui;
+//import 'dart:ui' as ui;
 //StatelessWidget
 void main() {
   runApp(const VisionAssistApp());
@@ -50,7 +50,7 @@ int    _jpegQuality = 12;       // 1~63，數字越小越好
 //bool _isStreaming = false;  // 串流開關狀態
 
 // 預設放好的 API Key（使用者可一鍵複製）
-final String _presetApiKey = 'AQ.Ab8RN6LKTxDJm4DdoFce-BwEdNbsLALHJQG9lgDPNf680vs6NQ';  // ← 填入
+final String _presetApiKey = '不能放了，自己去官網複製一個';  // ← 填入
 
 // ── App 入口 ──────────────────────────────────────────────────────
 class VisionAssistApp extends StatelessWidget {
@@ -114,7 +114,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   String   _resultText = '按下「拍照辨識」開始使用';
   String   _statusText = '等待中';
   Uint8List? _photoBytes;
-  Uint8List? _originalBytes;   // 新增，傳給 Gemini 用（原始）
   bool _deviceOnline   = false;
 
   // ── 電池狀態（方案 B：純顯示）─────────────────────────────────
@@ -128,9 +127,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   bool       _isStreaming    = false;
   Uint8List? _streamBytes;   // 串流畫面
   bool       _streamRunning  = false;
-
-  //照片旋轉角度
-  int _rotationDegrees = 0;  // 維持 int，0~360 都可以輸入
 
   // ── TTS ────────────────────────────────────────────────────────
   late FlutterTts _tts;
@@ -272,17 +268,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
         return;
       }
       setState(() { _photoBytes = resp.bodyBytes; });
-      // 旋轉照片
-      _originalBytes = resp.bodyBytes;  // 保存原始
-      final rotated = await _rotateImage(resp.bodyBytes, _rotationDegrees);
-      setState(() { _photoBytes = rotated; });  // 顯示旋轉後
-
 
       setState(() {
         _state      = AppState.analyzing;
         _statusText = '分析中...';
       });
-      final description = await _callGeminiVision(_originalBytes!);  // Gemini 用原始
+      final description = await _callGeminiVision(resp.bodyBytes);  // Gemini 用原始
 
       setState(() {
         _state      = AppState.speaking;
@@ -346,10 +337,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
           .get(Uri.parse('http://$_espHost/capture_now'))
           .timeout(const Duration(seconds: 15));
       if (resp.statusCode == 200) {
-        _originalBytes = resp.bodyBytes;  // 保存原始
-        final rotated = await _rotateImage(resp.bodyBytes, _rotationDegrees);
-        setState(() { _photoBytes = rotated; });  // 顯示旋轉後
-        imageBytes = _originalBytes;  // Gemini 用原始
+        setState(() { _photoBytes = imageBytes; });
         //debugPrint('[HTTP] 取得照片 ${imageBytes.length} bytes');
         debugPrint('[HTTP] 取得照片 ${resp.bodyBytes.length} bytes');
       } else {
@@ -389,37 +377,6 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       _resultText = description ?? '無法取得描述';
     });
     //await _speak(description ?? '無法取得描述');
-  }
-
-  // 旋轉照片（回傳旋轉後的 Uint8List）
-  Future<Uint8List> _rotateImage(Uint8List bytes, int degrees) async {
-    if (degrees == 0) return bytes;
-
-    final codec    = await ui.instantiateImageCodec(bytes);
-    final frame    = await codec.getNextFrame();
-    final image    = frame.image;
-    final recorder = ui.PictureRecorder();
-
-    final double w   = image.width.toDouble();
-    final double h   = image.height.toDouble();
-    final double rad = degrees * pi / 180;
-
-    // 計算旋轉後的邊界大小
-    final double cos = (pi / 180 * degrees).abs();
-    final double newW = (w * cos + h * (1 - cos)).abs();
-    final double newH = (h * cos + w * (1 - cos)).abs();
-
-    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, newW, newH));
-    canvas.translate(newW / 2, newH / 2);
-    canvas.rotate(rad);
-    canvas.translate(-w / 2, -h / 2);
-    canvas.drawImage(image, Offset.zero, Paint());
-
-    final picture  = recorder.endRecording();
-    final rotated  = await picture.toImage(newW.toInt(), newH.toInt());
-    final byteData = await rotated.toByteData(format: ui.ImageByteFormat.rawRgba);
-
-    return byteData!.buffer.asUint8List();
   }
 
   //  下載 / 分享照片
@@ -825,11 +782,10 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               //  hint: '請用繁體中文描述...'),
               const SizedBox(height: 20),
               const SizedBox(height: 12),
-              const Text('照片旋轉角度（0～360）',
+              /*const Text('照片旋轉角度（0～360）',
                   style: TextStyle(color: Colors.white60, fontSize: 14)),
               const SizedBox(height: 8),
               TextFormField(
-                initialValue: _rotationDegrees.toString(),
                 keyboardType: TextInputType.number,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
@@ -854,7 +810,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                     setState(() { _rotationDegrees = parsed; });
                   }
                 },
-              ),
+              ),*/
               const SizedBox(height: 12),
               const Text('鏡頭解析度',
                   style: TextStyle(color: Colors.white60, fontSize: 14)),
