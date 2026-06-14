@@ -50,7 +50,7 @@ int    _jpegQuality = 12;       // 1~63，數字越小越好
 //bool _isStreaming = false;  // 串流開關狀態
 
 // 預設放好的 API Key（使用者可一鍵複製）
-final String _presetApiKey = '不能放了，自己去官網複製一個';  // ← 填入
+final String _presetApiKey = 'Ab8RN6I2UnRiwvZqes2lMRh2eNDuLw31ndOXLUXniyhyL6UvzA';  // ← 填入
 
 // ── App 入口 ──────────────────────────────────────────────────────
 class VisionAssistApp extends StatelessWidget {
@@ -534,7 +534,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       ],
       'generationConfig': {
         'temperature':     0.4,
-        'maxOutputTokens': 150,  // 原本 500，改成 150，描述更短更快念完
+        'maxOutputTokens': 100,  // 原本 500，改成 150，描述更短更快念完
       },
     });
 
@@ -673,6 +673,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
                 label: '提示詞',
                 maxLines: 4,
                 hint: "請用繁體中文描述...",
+                onSubmitted: (_) => FocusScope.of(context).unfocus(),
               ),
             ),
             const SizedBox(height: 8),
@@ -774,7 +775,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
 
 // ── 2. API Key 輸入框（原本就有）──
               _SettingField(controller: apiCtrl,
-                  label: 'Gemini API Key', hint: 'AIza...'),
+                  label: 'Gemini API Key AQ.-', hint: 'AIza...'),
               const SizedBox(height: 12),
               //_SettingField(controller: apiCtrl,    label: 'Gemini API Key', hint: 'AIza...'),
               const SizedBox(height: 12),
@@ -1256,17 +1257,21 @@ class _SettingField extends StatelessWidget {
   final String label;
   final String hint;
   final int maxLines;
+  final ValueChanged<String>? onSubmitted;
   const _SettingField({
     required this.controller,
     required this.label,
     required this.hint,
     this.maxLines = 1,
+    this.onSubmitted,
   });
 
   @override
   Widget build(BuildContext context) => TextField(
     controller: controller,
     maxLines: maxLines,
+    textInputAction: TextInputAction.done,
+    onSubmitted: onSubmitted,
     style: const TextStyle(color: Colors.white),
     decoration: InputDecoration(
       labelText: label,
