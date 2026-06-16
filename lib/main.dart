@@ -107,6 +107,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   String _promptText = '請用繁體中文簡短描述這張照片最重要的內容，50字以內，直接描述不要分點。';
   // 宣告一個全域的控制器，並把預設提示詞塞進去
   final TextEditingController promptCtrl = TextEditingController(text: '請用繁體中文詳細描述這張照片的內容...');
+  late TextEditingController _promptController;
   DateTime? _lastApiCallTime;  // 上次呼叫 Gemini 的時間
 
   // ── 狀態 ───────────────────────────────────────────────────────
@@ -142,14 +143,16 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    _promptController = TextEditingController(text: _promptText);
     _initTts();
     _initAnimation();
     _checkDeviceConnection();
-    _startPolling();  // ← 加這行
+    _startPolling();
   }
 
   @override
   void dispose() {
+    _promptController.dispose();
     _tts.stop();
     _pulseController.dispose();
     super.dispose();
@@ -359,7 +362,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       _state      = AppState.analyzing;
       _statusText = '分析中...';
     });
-    await _speak('正在分析畫面');
+    _speak('正在分析畫面');
 
     String? description;
     try {
@@ -534,7 +537,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
       ],
       'generationConfig': {
         'temperature':     0.4,
-        'maxOutputTokens': 100,  // 原本 500，改成 150，描述更短更快念完
+        'maxOutputTokens': 60,
       },
     });
 
@@ -669,11 +672,12 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: _SettingField(
-                controller: promptCtrl,
+                controller: _promptController,
                 label: '提示詞',
                 maxLines: 4,
                 hint: "請用繁體中文描述...",
                 onSubmitted: (_) => FocusScope.of(context).unfocus(),
+                onChanged: (value) => setState(() { _promptText = value; }),
               ),
             ),
             const SizedBox(height: 8),
@@ -777,10 +781,7 @@ class _MainScreenState extends State<MainScreen> with TickerProviderStateMixin {
               _SettingField(controller: apiCtrl,
                   label: 'Gemini API Key AQ.-', hint: 'AIza...'),
               const SizedBox(height: 12),
-              //_SettingField(controller: apiCtrl,    label: 'Gemini API Key', hint: 'AIza...'),
               const SizedBox(height: 12),
-              //_SettingField(controller: promptCtrl, label: '提示詞', maxLines: 4,
-              //  hint: '請用繁體中文描述...'),
               const SizedBox(height: 20),
               const SizedBox(height: 12),
               /*const Text('照片旋轉角度（0～360）',
@@ -1258,12 +1259,14 @@ class _SettingField extends StatelessWidget {
   final String hint;
   final int maxLines;
   final ValueChanged<String>? onSubmitted;
+  final ValueChanged<String>? onChanged;
   const _SettingField({
     required this.controller,
     required this.label,
     required this.hint,
     this.maxLines = 1,
     this.onSubmitted,
+    this.onChanged,
   });
 
   @override
@@ -1272,6 +1275,7 @@ class _SettingField extends StatelessWidget {
     maxLines: maxLines,
     textInputAction: TextInputAction.done,
     onSubmitted: onSubmitted,
+    onChanged: onChanged,
     style: const TextStyle(color: Colors.white),
     decoration: InputDecoration(
       labelText: label,
